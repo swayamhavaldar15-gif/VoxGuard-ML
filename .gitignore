@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Downloaded models
+models/
+
+# Speaker enrollment data
+speaker_verification/models/*.wav
+speaker_verification/models/*.pt
+
+# Test recordings
+speaker_verification/reference_audio/*
+speaker_verification/test_audio/*
