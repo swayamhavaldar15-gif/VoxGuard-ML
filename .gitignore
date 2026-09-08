@@ -1,17 +1,36 @@
-# Virtual environment
+# Python
 .venv/
-
-# Python cache
 __pycache__/
 *.pyc
 
-# Downloaded models
+# Environment / secrets
+.env
+.env.*
+
+# ML models
 models/
+*.pth
+*.pt
+*.joblib
 
-# Speaker enrollment data
+# Speaker audio / recordings
 speaker_verification/models/*.wav
-speaker_verification/models/*.pt
+speaker_verification/reference_audio/
+speaker_verification/test_audio/
+*.wav
+*.mp3
+*.webm
 
-# Test recordings
-speaker_verification/reference_audio/*
-speaker_verification/test_audio/*
+# AASIST
+anti_spoofing/aasist/models/weights/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

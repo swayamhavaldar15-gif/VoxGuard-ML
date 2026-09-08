@@ -1,33 +1,55 @@
+import os
+import numpy as np
 import sounddevice as sd
-import scipy.io.wavfile as wav
+import soundfile as sf
 import torch
 import torch.nn.functional as F
-import time
-import os
 
 from speechbrain.inference.speaker import EncoderClassifier
 from speechbrain.utils.fetching import LocalStrategy
 
 
-# --------------------------------
+# ============================================================
 # SETTINGS
-# --------------------------------
+# ============================================================
 
 SAMPLE_RATE = 16000
 DURATION = 5
 
-LIVE_AUDIO_FILE = "speaker_verification/models/live_test.wav"
+RAW_AUDIO_FILE = (
+    "speaker_verification/models/live_test.wav"
+)
+
+PROCESSED_AUDIO_FILE = (
+    "speaker_verification/models/live_processed.wav"
+)
 
 REGISTERED_EMBEDDING_FILE = (
     "speaker_verification/models/registered_embedding.pt"
 )
 
 
-# --------------------------------
-# LOAD MODEL
-# --------------------------------
+# ============================================================
+# SPEAKER THRESHOLDS
+# ============================================================
 
-print("Loading Speaker Recognition Model...")
+SPEAKER_THRESHOLD = 0.50
+
+
+# ============================================================
+# START
+# ============================================================
+
+print("=" * 60)
+print("VOXGUARD - LIVE SPEAKER VERIFICATION")
+print("=" * 60)
+
+
+# ============================================================
+# LOAD ECAPA
+# ============================================================
+
+print("\nLoading Speaker Recognition Model...")
 
 classifier = EncoderClassifier.from_hparams(
     source="speechbrain/spkrec-ecapa-voxceleb",
@@ -35,37 +57,51 @@ classifier = EncoderClassifier.from_hparams(
     local_strategy=LocalStrategy.COPY
 )
 
+print("Speaker model loaded successfully.")
 
-# --------------------------------
-# LOAD REGISTERED SPEAKER
-# --------------------------------
 
-print("Loading Registered Speaker Profile...")
+# ============================================================
+# LOAD REGISTERED EMBEDDING
+# ============================================================
+
+print("\nLoading Registered Speaker Profile...")
 
 registered_embedding = torch.load(
     REGISTERED_EMBEDDING_FILE,
-    weights_only=True
+    map_location="cpu"
 )
 
+registered_embedding = registered_embedding.squeeze()
 
-# --------------------------------
-# COUNTDOWN
-# --------------------------------
+registered_embedding = F.normalize(
+    registered_embedding,
+    p=2,
+    dim=0
+)
 
-print("\nLive verification will start in:")
+print(
+    "Registered embedding shape:",
+    registered_embedding.shape
+)
 
-for i in range(3, 0, -1):
-
-    print(i)
-    time.sleep(1)
-
-
-print("\n🎤 SPEAK NOW!")
+print("Registered speaker profile loaded.")
 
 
-# --------------------------------
-# RECORD LIVE AUDIO
-# --------------------------------
+# ============================================================
+# RECORD AUDIO
+# ============================================================
+
+print("\n" + "=" * 60)
+print("LIVE MICROPHONE RECORDING")
+print("=" * 60)
+
+print(f"\nSpeak normally for {DURATION} seconds.")
+print("Starting in 2 seconds...")
+
+import time
+time.sleep(2)
+
+print("\nRecording...")
 
 audio = sd.rec(
     int(DURATION * SAMPLE_RATE),
@@ -76,81 +112,289 @@ audio = sd.rec(
 
 sd.wait()
 
-
 print("Recording completed!")
 
 
-# --------------------------------
-# SAVE LIVE AUDIO
-# --------------------------------
+# ============================================================
+# CONVERT TO MONO
+# ============================================================
 
-wav.write(
-    LIVE_AUDIO_FILE,
-    SAMPLE_RATE,
-    audio
+audio = np.asarray(audio)
+
+if audio.ndim > 1:
+    audio = audio.mean(axis=1)
+
+audio = audio.flatten()
+
+
+# ============================================================
+# AUDIO DIAGNOSTICS
+# ============================================================
+
+print("\n" + "=" * 60)
+print("RAW AUDIO INFORMATION")
+print("=" * 60)
+
+print("Samples:", len(audio))
+print("Sample rate:", SAMPLE_RATE)
+print("Duration:", len(audio) / SAMPLE_RATE)
+
+rms = np.sqrt(np.mean(audio ** 2))
+peak = np.max(np.abs(audio))
+
+print(f"RMS: {rms:.6f}")
+print(f"Peak: {peak:.6f}")
+
+
+# ============================================================
+# REMOVE DC OFFSET
+# ============================================================
+
+audio = audio - np.mean(audio)
+
+
+# ============================================================
+# NORMALIZE AUDIO
+# ============================================================
+
+max_value = np.max(np.abs(audio))
+
+if max_value > 0:
+
+    audio = audio / max_value
+
+print("\nAudio normalization completed.")
+
+
+# ============================================================
+# SAVE RAW/NORMALIZED AUDIO
+# ============================================================
+
+sf.write(
+    RAW_AUDIO_FILE,
+    audio,
+    SAMPLE_RATE
+)
+
+print(
+    "Live recording saved:",
+    RAW_AUDIO_FILE
 )
 
 
-# --------------------------------
-# GENERATE LIVE EMBEDDING
-# --------------------------------
+# ============================================================
+# SIMPLE SPEECH ACTIVITY DETECTION
+# ============================================================
 
-print("Analyzing Voice...")
+print("\nDetecting speech region...")
 
+absolute_audio = np.abs(audio)
+
+threshold = max(
+    0.02,
+    np.percentile(absolute_audio, 20)
+)
+
+speech_indices = np.where(
+    absolute_audio > threshold
+)[0]
+
+
+if len(speech_indices) > 0:
+
+    start = speech_indices[0]
+    end = speech_indices[-1]
+
+    # Add small padding around speech
+    padding = int(0.25 * SAMPLE_RATE)
+
+    start = max(
+        0,
+        start - padding
+    )
+
+    end = min(
+        len(audio),
+        end + padding
+    )
+
+    speech_audio = audio[start:end]
+
+else:
+
+    speech_audio = audio
+
+
+# ============================================================
+# CHECK SPEECH LENGTH
+# ============================================================
+
+print(
+    f"Detected speech duration: "
+    f"{len(speech_audio) / SAMPLE_RATE:.2f} seconds"
+)
+
+if len(speech_audio) < int(1.0 * SAMPLE_RATE):
+
+    print("\nWARNING: Very little speech detected.")
+
+    speech_audio = audio
+
+
+# ============================================================
+# SAVE PROCESSED AUDIO
+# ============================================================
+
+sf.write(
+    PROCESSED_AUDIO_FILE,
+    speech_audio,
+    SAMPLE_RATE
+)
+
+print(
+    "Processed audio saved:",
+    PROCESSED_AUDIO_FILE
+)
+
+
+# ============================================================
+# LOAD PROCESSED AUDIO
+# ============================================================
+
+print("\n" + "=" * 60)
+print("EXTRACTING LIVE SPEAKER EMBEDDING")
+print("=" * 60)
 
 signal = classifier.load_audio(
-    LIVE_AUDIO_FILE
+    PROCESSED_AUDIO_FILE
+)
+
+print(
+    "Live audio tensor shape:",
+    signal.shape
+)
+
+print(
+    "Live audio dtype:",
+    signal.dtype
 )
 
 
-live_embedding = classifier.encode_batch(
-    signal
-)
+# ============================================================
+# ECAPA EMBEDDING
+# ============================================================
 
+with torch.no_grad():
+
+    live_embedding = classifier.encode_batch(
+        signal
+    )
+
+print(
+    "Raw live embedding shape:",
+    live_embedding.shape
+)
 
 live_embedding = live_embedding.squeeze()
 
+print(
+    "Squeezed embedding shape:",
+    live_embedding.shape
+)
 
-# --------------------------------
-# CALCULATE SIMILARITY
-# --------------------------------
+live_embedding = F.normalize(
+    live_embedding,
+    p=2,
+    dim=0
+)
+
+print(
+    "Final live embedding shape:",
+    live_embedding.shape
+)
+
+
+# ============================================================
+# COSINE SIMILARITY
+# ============================================================
 
 similarity = F.cosine_similarity(
     registered_embedding.unsqueeze(0),
     live_embedding.unsqueeze(0)
-)
+).item()
 
 
-similarity_score = similarity.item()
+# ============================================================
+# SPEAKER DECISION
+# ============================================================
 
-
-# --------------------------------
-# DECISION
-# --------------------------------
-
-THRESHOLD = 0.50
-
-
-print("\n-----------------------------")
+print("\n" + "=" * 60)
+print("SPEAKER VERIFICATION RESULT")
+print("=" * 60)
 
 print(
-    f"Similarity Score: {similarity_score:.4f}"
+    f"\nSpeaker Similarity: {similarity:.4f}"
 )
 
 print(
-    f"Threshold: {THRESHOLD}"
+    f"Speaker Threshold: {SPEAKER_THRESHOLD:.2f}"
 )
 
 
-if similarity_score >= THRESHOLD:
+if similarity >= SPEAKER_THRESHOLD:
 
-    print("\n✅ VERIFIED")
-    print("Registered speaker detected.")
+    speaker_status = "VERIFIED"
 
 else:
 
-    print("\n🚨 SPEAKER MISMATCH")
-    print("Speaker does not match registered profile.")
+    speaker_status = "MISMATCH"
 
 
-print("-----------------------------")
+print(
+    "Speaker Status:",
+    speaker_status
+)
+
+
+# ============================================================
+# SIMILARITY INTERPRETATION
+# ============================================================
+
+print("\n" + "-" * 60)
+print("SIMILARITY INTERPRETATION")
+print("-" * 60)
+
+if similarity >= 0.70:
+
+    print("VERY STRONG SPEAKER MATCH")
+
+elif similarity >= 0.50:
+
+    print("STRONG ENOUGH SPEAKER MATCH")
+
+elif similarity >= 0.30:
+
+    print("MODERATE / UNCERTAIN MATCH")
+
+else:
+
+    print("LOW SPEAKER SIMILARITY")
+
+
+# ============================================================
+# FINAL ACCESS DECISION
+# ============================================================
+
+print("\n" + "=" * 60)
+print("VOXGUARD ACCESS DECISION")
+print("=" * 60)
+
+if speaker_status == "VERIFIED":
+
+    print("ACCESS: ALLOWED")
+
+else:
+
+    print("ACCESS: BLOCKED")
+
+print("=" * 60)
