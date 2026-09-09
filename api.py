@@ -27,10 +27,9 @@ AASIST_PATH = os.path.join(
     "anti_spoofing"
 )
 
-sys.path.insert(0, AASIST_PATH)
+if AASIST_PATH not in sys.path:
+    sys.path.insert(0, AASIST_PATH)
 
-
-# Import your existing AASIST inference function
 from aasist_inference import predict_spoof
 
 
@@ -64,12 +63,23 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+
     allow_origins=[
+        # Vite development servers
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
+
+        # GitHub Pages
+        "https://swayamhavaldar15-gif.github.io",
+        "https://swayamhavaldar15-gif.github.io/VoxGuard-ML",
     ],
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -256,7 +266,7 @@ def calculate_final_risk(
 ):
 
     # --------------------------------------------------------
-    # Base speaker risk
+    # Speaker risk
     # --------------------------------------------------------
 
     speaker_risk = calculate_speaker_risk(
@@ -267,11 +277,9 @@ def calculate_final_risk(
         "risk_score"
     ]
 
-
     # --------------------------------------------------------
     # AASIST spoof risk
     #
-    # spoof_score:
     # 0.0 = more bona-fide
     # 1.0 = more spoof
     # --------------------------------------------------------
@@ -282,9 +290,8 @@ def calculate_final_risk(
         )
     )
 
-
     # --------------------------------------------------------
-    # Combined score
+    # Combined risk
     #
     # 60% speaker verification
     # 40% anti-spoofing
@@ -298,10 +305,8 @@ def calculate_final_risk(
         )
     )
 
-
     # --------------------------------------------------------
-    # Important:
-    # Speaker mismatch should always remain HIGH risk.
+    # Speaker mismatch should always remain HIGH risk
     # --------------------------------------------------------
 
     if speaker_status == "MISMATCH":
@@ -311,11 +316,11 @@ def calculate_final_risk(
             80
         )
 
-
     # --------------------------------------------------------
-    # AASIST currently uses a temporary threshold.
+    # AASIST threshold
     #
-    # We will calibrate this later using validation data.
+    # Temporary threshold.
+    # Should be calibrated later with validation data.
     # --------------------------------------------------------
 
     if spoof_score >= 0.50:
@@ -325,7 +330,6 @@ def calculate_final_risk(
     else:
 
         anti_spoof_status = "LIKELY_BONA_FIDE"
-
 
     # --------------------------------------------------------
     # Final risk level
@@ -342,7 +346,6 @@ def calculate_final_risk(
     else:
 
         final_risk_level = "LOW"
-
 
     return {
 
@@ -404,7 +407,7 @@ async def register_voice(
     try:
 
         # ----------------------------------------------------
-        # Temporary input
+        # Temporary input file
         # ----------------------------------------------------
 
         input_file = tempfile.NamedTemporaryFile(
@@ -416,9 +419,8 @@ async def register_voice(
 
         input_file.close()
 
-
         # ----------------------------------------------------
-        # Temporary WAV
+        # Temporary WAV file
         # ----------------------------------------------------
 
         wav_file = tempfile.NamedTemporaryFile(
@@ -430,12 +432,17 @@ async def register_voice(
 
         wav_file.close()
 
-
         # ----------------------------------------------------
-        # Save uploaded audio
+        # Read uploaded audio
         # ----------------------------------------------------
 
         audio_data = await audio.read()
+
+        if not audio_data:
+
+            raise RuntimeError(
+                "No audio data received."
+            )
 
         with open(
             temp_input,
@@ -444,9 +451,14 @@ async def register_voice(
 
             f.write(audio_data)
 
+        print(
+            "Received audio:",
+            len(audio_data),
+            "bytes"
+        )
 
         # ----------------------------------------------------
-        # Convert
+        # Convert WebM -> WAV
         # ----------------------------------------------------
 
         convert_to_wav(
@@ -454,15 +466,21 @@ async def register_voice(
             temp_wav
         )
 
+        print(
+            "Audio converted successfully."
+        )
 
         # ----------------------------------------------------
-        # ECAPA
+        # ECAPA embedding
         # ----------------------------------------------------
+
+        print(
+            "Generating speaker embedding..."
+        )
 
         embedding = get_embedding(
             temp_wav
         )
-
 
         embedding_list = (
             embedding
@@ -470,10 +488,13 @@ async def register_voice(
             .tolist()
         )
 
+        # ----------------------------------------------------
+        # Supabase registration
+        # ----------------------------------------------------
 
-        # ----------------------------------------------------
-        # Supabase
-        # ----------------------------------------------------
+        print(
+            "Saving speaker to Supabase..."
+        )
 
         response = supabase.table(
             "speaker_registrations"
@@ -487,19 +508,17 @@ async def register_voice(
 
         }).execute()
 
-
         if not response.data:
 
             raise RuntimeError(
                 "Speaker registration failed."
             )
 
-
         registration_id = (
             response.data[0]["id"]
         )
 
-
+        print()
         print(
             "Speaker registered successfully."
         )
@@ -514,6 +533,7 @@ async def register_voice(
             registration_id
         )
 
+        print()
 
         return {
 
@@ -530,9 +550,13 @@ async def register_voice(
 
         }
 
+    except HTTPException:
+
+        raise
 
     except Exception as e:
 
+        print()
         print(
             "Registration error:",
             str(e)
@@ -543,7 +567,6 @@ async def register_voice(
             detail=str(e)
         )
 
-
     finally:
 
         if temp_input and os.path.exists(
@@ -551,7 +574,6 @@ async def register_voice(
         ):
 
             os.remove(temp_input)
-
 
         if temp_wav and os.path.exists(
             temp_wav
@@ -608,7 +630,6 @@ async def verify_voice(
                 1
             ).execute()
 
-
         if not response.data:
 
             raise HTTPException(
@@ -616,20 +637,17 @@ async def verify_voice(
                 detail="No registered speaker found."
             )
 
-
         registered_speaker = (
             response.data[0]
         )
-
 
         registered_embedding = torch.tensor(
             registered_speaker["embedding"],
             dtype=torch.float32
         )
 
-
         # ----------------------------------------------------
-        # Temporary files
+        # Temporary input
         # ----------------------------------------------------
 
         input_file = tempfile.NamedTemporaryFile(
@@ -641,6 +659,9 @@ async def verify_voice(
 
         input_file.close()
 
+        # ----------------------------------------------------
+        # Temporary WAV
+        # ----------------------------------------------------
 
         wav_file = tempfile.NamedTemporaryFile(
             delete=False,
@@ -651,12 +672,17 @@ async def verify_voice(
 
         wav_file.close()
 
-
         # ----------------------------------------------------
-        # Save uploaded audio
+        # Read uploaded audio
         # ----------------------------------------------------
 
         audio_data = await audio.read()
+
+        if not audio_data:
+
+            raise RuntimeError(
+                "No audio data received."
+            )
 
         with open(
             temp_input,
@@ -665,9 +691,8 @@ async def verify_voice(
 
             f.write(audio_data)
 
-
         # ----------------------------------------------------
-        # Convert to 16kHz mono WAV
+        # Convert to WAV
         # ----------------------------------------------------
 
         convert_to_wav(
@@ -675,29 +700,27 @@ async def verify_voice(
             temp_wav
         )
 
-
         # ====================================================
-        # ECAPA SPEAKER VERIFICATION
+        # ECAPA
         # ====================================================
 
         print()
-        print("Running ECAPA speaker verification...")
+        print(
+            "Running ECAPA speaker verification..."
+        )
 
         live_embedding = get_embedding(
             temp_wav
         )
-
 
         similarity = cosine_similarity(
             registered_embedding,
             live_embedding
         )
 
-
         speaker_risk = calculate_speaker_risk(
             similarity
         )
-
 
         print(
             "ECAPA Similarity:",
@@ -711,18 +734,18 @@ async def verify_voice(
             ]
         )
 
-
         # ====================================================
-        # AASIST ANTI-SPOOFING
+        # AASIST
         # ====================================================
 
         print()
-        print("Running AASIST anti-spoofing...")
+        print(
+            "Running AASIST anti-spoofing..."
+        )
 
         aasist_result = predict_spoof(
             temp_wav
         )
-
 
         spoof_score = float(
             aasist_result[
@@ -736,12 +759,14 @@ async def verify_voice(
             ]
         )
 
-        spoof_label = (
-            aasist_result[
-                "spoof_label"
-            ]
-        )
+        # IMPORTANT:
+        # aasist_inference.py returns "label",
+        # not "spoof_label".
 
+        spoof_label = aasist_result.get(
+            "label",
+            "UNKNOWN"
+        )
 
         print(
             "AASIST Spoof Score:",
@@ -758,7 +783,6 @@ async def verify_voice(
             spoof_label
         )
 
-
         # ====================================================
         # FINAL RISK
         # ====================================================
@@ -770,7 +794,6 @@ async def verify_voice(
                 "speaker_status"
             ]
         )
-
 
         print()
         print("==========================================")
@@ -824,7 +847,6 @@ async def verify_voice(
 
         print()
 
-
         # ====================================================
         # SAVE VERIFICATION LOG
         # ====================================================
@@ -856,10 +878,8 @@ async def verify_voice(
 
         }
 
-
         # ----------------------------------------------------
-        # Try to save extra AASIST information if columns
-        # exist. If they don't, save the original columns.
+        # Try extended AASIST columns
         # ----------------------------------------------------
 
         try:
@@ -887,19 +907,25 @@ async def verify_voice(
                 extended_log
             ).execute()
 
+        except Exception as log_error:
 
-        except Exception:
+            print(
+                "Extended verification log failed:",
+                str(log_error)
+            )
 
-            # Existing database schema only
+            print(
+                "Trying original verification log..."
+            )
+
             supabase.table(
                 "verification_logs"
             ).insert(
                 log_data
             ).execute()
 
-
         # ====================================================
-        # RETURN RESULT TO FRONTEND
+        # RETURN RESULT
         # ====================================================
 
         return {
@@ -928,7 +954,6 @@ async def verify_voice(
                     "speaker_status"
                 ],
 
-
             # AASIST
             "spoof_score":
                 round(
@@ -950,7 +975,6 @@ async def verify_voice(
                     "anti_spoof_status"
                 ],
 
-
             # FINAL RISK
             "risk_level":
                 final_risk[
@@ -964,11 +988,9 @@ async def verify_voice(
 
         }
 
-
     except HTTPException:
 
         raise
-
 
     except Exception as e:
 
@@ -983,7 +1005,6 @@ async def verify_voice(
             detail=str(e)
         )
 
-
     finally:
 
         if temp_input and os.path.exists(
@@ -991,7 +1012,6 @@ async def verify_voice(
         ):
 
             os.remove(temp_input)
-
 
         if temp_wav and os.path.exists(
             temp_wav
