@@ -1,20 +1,44 @@
-import sys
-from pathlib import Path
+"""
+VoxGuard - AASIST Anti-Spoofing Inference
 
+Uses the official AASIST model from:
+https://github.com/clovaai/aasist
+
+Designed to work both:
+1. Locally on Windows
+2. On Render Linux deployment
+
+The model detects whether speech is likely:
+- BONAFIDE / genuine
+- SPOOF / potentially replayed, synthesized, or manipulated
+"""
+
+from pathlib import Path
+import importlib.util
+
+import numpy as np
+import soundfile as sf
 import torch
 import torch.nn.functional as F
-import soundfile as sf
 
 
 # ============================================================
 # PATHS
 # ============================================================
 
-ROOT = Path(__file__).resolve().parent
+# Project root:
+# VoxGuard-ML/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-AASIST_ROOT = ROOT / "aasist"
+# Official AASIST repository:
+# VoxGuard-ML/anti_spoofing/aasist/
+AASIST_ROOT = PROJECT_ROOT / "anti_spoofing" / "aasist"
 
-CHECKPOINT = (
+# Official AASIST model file:
+AASIST_MODEL_FILE = AASIST_ROOT / "models" / "AASIST.py"
+
+# Pretrained weights:
+AASIST_WEIGHTS = (
     AASIST_ROOT
     / "models"
     / "weights"
@@ -23,10 +47,10 @@ CHECKPOINT = (
 
 
 # ============================================================
-# AASIST MODEL CONFIGURATION
+# AASIST CONFIGURATION
 # ============================================================
 
-MODEL_CONFIG = {
+AASIST_CONFIG = {
     "architecture": "AASIST",
     "nb_samp": 64600,
     "first_conv": 128,
@@ -43,70 +67,145 @@ MODEL_CONFIG = {
 }
 
 
-# ============================================================
-# AUDIO SETTINGS
-# ============================================================
+# AASIST works with 16 kHz audio.
+SAMPLE_RATE = 16000
 
-TARGET_SAMPLE_RATE = 16000
-TARGET_SAMPLES = 64600
+# Official AASIST input size.
+NUM_SAMPLES = 64600
 
 
 # ============================================================
 # DEVICE
 # ============================================================
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print("==============================================")
+print("VoxGuard AASIST Anti-Spoofing")
+print("==============================================")
+print(f"Device: {DEVICE}")
+print(f"AASIST root: {AASIST_ROOT}")
+print(f"AASIST model: {AASIST_MODEL_FILE}")
+print(f"AASIST weights: {AASIST_WEIGHTS}")
 
 
 # ============================================================
-# LOAD AASIST MODEL
+# LOAD AASIST MODEL CLASS
+# ============================================================
+
+def load_aasist_model_class():
+    """
+    Load the official AASIST Model class directly from
+    models/AASIST.py.
+
+    This avoids the error:
+
+        ModuleNotFoundError:
+        No module named 'models.AASIST'
+
+    because we do not depend on the current working directory
+    or Python package search path.
+    """
+
+    if not AASIST_MODEL_FILE.exists():
+        raise FileNotFoundError(
+            f"AASIST model source file was not found:\n"
+            f"{AASIST_MODEL_FILE}"
+        )
+
+    print("Loading official AASIST model source...")
+
+    spec = importlib.util.spec_from_file_location(
+        "voxguard_aasist_model",
+        str(AASIST_MODEL_FILE),
+    )
+
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"Could not load AASIST module from:\n"
+            f"{AASIST_MODEL_FILE}"
+        )
+
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, "Model"):
+        raise AttributeError(
+            "AASIST.py does not contain the expected "
+            "'Model' class."
+        )
+
+    print("AASIST Model class loaded successfully.")
+
+    return module.Model
+
+
+# ============================================================
+# INITIALIZE MODEL
 # ============================================================
 
 print("Loading AASIST model...")
-print(f"Device: {DEVICE}")
-print(f"Checkpoint: {CHECKPOINT}")
 
-
-if not CHECKPOINT.exists():
+if not AASIST_WEIGHTS.exists():
     raise FileNotFoundError(
-        f"AASIST checkpoint not found:\n{CHECKPOINT}"
+        "\nAASIST pretrained weights were not found.\n"
+        f"Expected file:\n{AASIST_WEIGHTS}\n\n"
+        "Make sure the Render build command downloads "
+        "AASIST.pth before starting the server."
     )
 
 
-# Add AASIST repository to Python path
-sys.path.insert(0, str(AASIST_ROOT))
+# Load the class directly from the official source.
+AASISTModel = load_aasist_model_class()
 
 
-from models.AASIST import Model
+# Create model.
+model = AASISTModel(AASIST_CONFIG)
 
 
-# Create model
-MODEL = Model(MODEL_CONFIG).to(DEVICE)
+# Load pretrained weights.
+print("Loading AASIST checkpoint...")
 
-
-# Load pretrained weights
 checkpoint = torch.load(
-    CHECKPOINT,
+    AASIST_WEIGHTS,
     map_location=DEVICE,
-    weights_only=True
 )
 
 
-MODEL.load_state_dict(checkpoint)
+# Some checkpoints may contain a state_dict wrapper.
+if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+    checkpoint = checkpoint["state_dict"]
 
-MODEL.eval()
+
+# Load weights.
+model.load_state_dict(checkpoint)
+
+
+# Move model to CPU/GPU.
+model.to(DEVICE)
+
+
+# Evaluation mode.
+model.eval()
 
 
 print("AASIST model loaded successfully.")
+print("==============================================")
 
 
 # ============================================================
-# LOAD AUDIO
+# AUDIO PREPROCESSING
 # ============================================================
 
-def load_audio(audio_path):
+def load_audio(audio_path: str):
+    """
+    Load an audio file and convert it into:
+        - mono
+        - float32
+        - 16 kHz
+        - exactly 64600 samples
+    """
 
     audio_path = Path(audio_path)
 
@@ -115,311 +214,230 @@ def load_audio(audio_path):
             f"Audio file not found:\n{audio_path}"
         )
 
-    print()
-    print("Loading audio...")
-
-
-    # Read WAV file
-    waveform, sample_rate = sf.read(
+    # Read audio using soundfile.
+    audio, sample_rate = sf.read(
         str(audio_path),
-        dtype="float32"
+        dtype="float32",
     )
 
-
-    print(f"Original sample rate: {sample_rate} Hz")
-
-
     # --------------------------------------------------------
-    # Check sample rate
+    # Convert stereo -> mono
     # --------------------------------------------------------
 
-    if sample_rate != TARGET_SAMPLE_RATE:
-
-        raise ValueError(
-            "\n"
-            "AASIST currently expects 16 kHz audio.\n"
-            f"Your audio is {sample_rate} Hz.\n\n"
-            "Please convert the WAV file to 16 kHz "
-            "before running AASIST."
-        )
-
-    print("Audio already at 16 kHz.")
-
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
 
     # --------------------------------------------------------
-    # Convert stereo → mono
+    # Convert to float32
     # --------------------------------------------------------
 
-    if waveform.ndim > 1:
-
-        waveform = waveform.mean(axis=1)
-
-        print("Converted stereo audio to mono.")
-
-    else:
-
-        print("Audio is already mono.")
-
+    audio = audio.astype(np.float32)
 
     # --------------------------------------------------------
-    # Convert NumPy → PyTorch tensor
+    # Resample if necessary
     # --------------------------------------------------------
 
-    waveform = torch.from_numpy(waveform)
-
-
-    # Remove invalid values
-    waveform = torch.nan_to_num(
-        waveform,
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0
-    )
-
-
-    # --------------------------------------------------------
-    # Audio length
-    # --------------------------------------------------------
-
-    original_samples = waveform.numel()
-
-    print(
-        f"Audio length: {original_samples} samples"
-    )
-
-
-    # --------------------------------------------------------
-    # Trim or pad to AASIST expected length
-    # --------------------------------------------------------
-
-    if original_samples >= TARGET_SAMPLES:
-
-        waveform = waveform[:TARGET_SAMPLES]
+    if sample_rate != SAMPLE_RATE:
 
         print(
-            f"Using first {TARGET_SAMPLES} samples."
+            f"Resampling audio: "
+            f"{sample_rate} Hz -> {SAMPLE_RATE} Hz"
         )
 
-    else:
+        # Use torch interpolation instead of scipy.
+        waveform = torch.from_numpy(audio)
 
-        padding = (
-            TARGET_SAMPLES - original_samples
+        new_length = int(
+            len(audio)
+            * SAMPLE_RATE
+            / sample_rate
         )
 
-        waveform = F.pad(
+        waveform = waveform.unsqueeze(0).unsqueeze(0)
+
+        waveform = F.interpolate(
             waveform,
-            (0, padding)
+            size=new_length,
+            mode="linear",
+            align_corners=False,
         )
 
-        print(
-            f"Padded with {padding} samples."
+        audio = (
+            waveform
+            .squeeze()
+            .numpy()
+            .astype(np.float32)
         )
-
-
-    return waveform
-
-
-# ============================================================
-# AASIST PREDICTION
-# ============================================================
-
-def predict_spoof(audio_path):
-
-    # Load and prepare audio
-    waveform = load_audio(audio_path)
-
-
-    # Add batch dimension
-    #
-    # Shape:
-    # [64600]
-    #
-    # becomes:
-    # [1, 64600]
-
-    waveform = waveform.unsqueeze(0)
-
-
-    # Move to CPU/GPU
-    waveform = waveform.to(DEVICE)
-
 
     # --------------------------------------------------------
-    # Run AASIST
+    # Convert to torch tensor
+    # --------------------------------------------------------
+
+    audio_tensor = torch.from_numpy(audio)
+
+    # --------------------------------------------------------
+    # Make exactly 64600 samples
+    # --------------------------------------------------------
+
+    if audio_tensor.numel() < NUM_SAMPLES:
+
+        # Pad short audio with zeros.
+        padding = NUM_SAMPLES - audio_tensor.numel()
+
+        audio_tensor = F.pad(
+            audio_tensor,
+            (0, padding),
+        )
+
+    elif audio_tensor.numel() > NUM_SAMPLES:
+
+        # Take first 64600 samples.
+        audio_tensor = audio_tensor[:NUM_SAMPLES]
+
+    return audio_tensor
+
+
+# ============================================================
+# SPOOF PREDICTION
+# ============================================================
+
+def predict_spoof(audio_path: str):
+    """
+    Run AASIST on an audio file.
+
+    Returns:
+
+        spoof_score
+            Probability-like score for spoof class.
+
+        bona_fide_score
+            Probability-like score for genuine speech.
+
+        label
+            "SPOOF" or "BONAFIDE"
+
+        anti_spoof_status
+            Human-readable status.
+    """
+
+    print("----------------------------------------------")
+    print("Running AASIST anti-spoofing...")
+    print(f"Audio: {audio_path}")
+
+    # Load and preprocess audio.
+    audio = load_audio(audio_path)
+
+    # Add batch dimension.
+    audio = audio.unsqueeze(0)
+
+    # Move to CPU/GPU.
+    audio = audio.to(DEVICE)
+
+    # --------------------------------------------------------
+    # Run inference
     # --------------------------------------------------------
 
     with torch.no_grad():
 
-        _, output = MODEL(waveform)
+        _, logits = model(audio)
 
-
-        # Convert model output to probabilities
-        class_probabilities = torch.softmax(
-            output,
-            dim=1
+        # Convert logits to probabilities.
+        probabilities = torch.softmax(
+            logits,
+            dim=1,
         )
 
-
-        # AASIST:
-        #
-        # Class 0 = spoof
-        # Class 1 = bona fide
-        #
-        # Therefore:
-        #
-        # bona_fide_score = probability of real speech
-
-        bona_fide_score = (
-            class_probabilities[:, 1].item()
-        )
-
-
     # --------------------------------------------------------
-    # Convert to VoxGuard spoof score
+    # Official AASIST output:
+    #
+    # class 0 = spoof
+    # class 1 = bona fide
     # --------------------------------------------------------
 
-    #
-    # Higher spoof_score = higher spoof risk
-    #
+    spoof_score = float(
+        probabilities[0, 0].item()
+    )
 
-    spoof_score = 1.0 - bona_fide_score
-
+    bona_fide_score = float(
+        probabilities[0, 1].item()
+    )
 
     # --------------------------------------------------------
-    # Initial label
+    # Determine label
     # --------------------------------------------------------
-
-    #
-    # NOTE:
-    # 0.50 is currently a TEMPORARY threshold.
-    #
-    # We will calibrate this later using real test data.
-    #
 
     if spoof_score >= 0.50:
 
-        spoof_label = "spoof"
+        label = "SPOOF"
+
+        anti_spoof_status = (
+            "POTENTIAL_SPOOF"
+        )
 
     else:
 
-        spoof_label = "bonafide"
+        label = "BONAFIDE"
 
-
-    # --------------------------------------------------------
-    # Return result
-    # --------------------------------------------------------
-
-    return {
-
-        "spoof_score": round(
-            spoof_score,
-            4
-        ),
-
-        "spoof_label": spoof_label,
-
-        "bona_fide_score": round(
-            bona_fide_score,
-            4
+        anti_spoof_status = (
+            "LIKELY_BONA_FIDE"
         )
 
+    # --------------------------------------------------------
+    # Print result
+    # --------------------------------------------------------
+
+    print(
+        f"Spoof score: {spoof_score:.4f}"
+    )
+
+    print(
+        f"Bona fide score: "
+        f"{bona_fide_score:.4f}"
+    )
+
+    print(
+        f"AASIST label: {label}"
+    )
+
+    print(
+        f"Anti-spoof status: "
+        f"{anti_spoof_status}"
+    )
+
+    print("----------------------------------------------")
+
+    return {
+        "spoof_score": spoof_score,
+        "bona_fide_score": bona_fide_score,
+        "label": label,
+        "anti_spoof_status": anti_spoof_status,
     }
 
 
 # ============================================================
-# MAIN
+# TEST MODE
 # ============================================================
 
 if __name__ == "__main__":
 
-    # --------------------------------------------------------
-    # Check command-line arguments
-    # --------------------------------------------------------
+    import sys
 
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
 
-        print()
-        print("Usage:")
         print(
-            "python anti_spoofing\\aasist_inference.py <audio.wav>"
-        )
-        print()
-
-        sys.exit(1)
-
-
-    # Get audio file
-    audio_file = Path(sys.argv[1])
-
-
-    # --------------------------------------------------------
-    # Check file
-    # --------------------------------------------------------
-
-    if not audio_file.exists():
-
-        print()
-        print("ERROR: Audio file not found:")
-        print(audio_file)
-        print()
-
-        sys.exit(1)
-
-
-    # --------------------------------------------------------
-    # Header
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 60)
-    print("VOXGUARD AASIST ANTI-SPOOFING TEST")
-    print("=" * 60)
-    print()
-
-
-    # --------------------------------------------------------
-    # Run prediction
-    # --------------------------------------------------------
-
-    try:
-
-        result = predict_spoof(
-            audio_file
+            "\nUsage:"
         )
 
-    except Exception as e:
-
-        print()
         print(
-            "ERROR during AASIST inference:"
+            "python anti_spoofing/aasist_inference.py "
+            "<audio_file.wav>"
         )
-        print()
-        print(str(e))
-        print()
 
         sys.exit(1)
 
+    test_audio = sys.argv[1]
 
-    # --------------------------------------------------------
-    # Display result
-    # --------------------------------------------------------
+    result = predict_spoof(test_audio)
 
-    print()
-    print(f"Audio:            {audio_file}")
-
-    print(
-        f"Spoof Score:      {result['spoof_score']}"
-    )
-
-    print(
-        f"Spoof Label:      {result['spoof_label']}"
-    )
-
-    print(
-        f"Bona-fide Score:  {result['bona_fide_score']}"
-    )
-
-    print()
-    print("=" * 60)
-    print("AASIST TEST COMPLETE")
-    print("=" * 60)
+    print("\nFinal result:")
+    print(result)
