@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import os
 import sys
+import gc
 
 
 # ============================================================
@@ -143,7 +144,6 @@ def convert_to_wav(input_path, output_path):
     )
 
     if result.returncode != 0:
-
         raise RuntimeError(
             "FFmpeg audio conversion failed:\n"
             + result.stderr.decode(
@@ -349,7 +349,8 @@ def calculate_final_risk(
 
     return {
 
-        "final_risk_score": final_score,
+        "final_risk_score":
+            final_score,
 
         "final_risk_level":
             final_risk_level,
@@ -374,13 +375,9 @@ def home():
         "status": "running",
 
         "services": [
-
             "ECAPA Speaker Verification",
-
             "AASIST Anti-Spoofing",
-
             "Risk Analysis"
-
         ]
 
     }
@@ -606,6 +603,8 @@ async def verify_voice(
         # Find registered speaker
         # ----------------------------------------------------
 
+        print("Loading registered speaker...")
+
         if registration_id is not None:
 
             response = supabase.table(
@@ -646,6 +645,16 @@ async def verify_voice(
             dtype=torch.float32
         )
 
+        print(
+            "Registered speaker:",
+            registered_speaker["speaker_name"]
+        )
+
+        print(
+            "Registration ID:",
+            registered_speaker["id"]
+        )
+
         # ----------------------------------------------------
         # Temporary input
         # ----------------------------------------------------
@@ -676,6 +685,8 @@ async def verify_voice(
         # Read uploaded audio
         # ----------------------------------------------------
 
+        print("Reading uploaded audio...")
+
         audio_data = await audio.read()
 
         if not audio_data:
@@ -683,6 +694,12 @@ async def verify_voice(
             raise RuntimeError(
                 "No audio data received."
             )
+
+        print(
+            "Received audio:",
+            len(audio_data),
+            "bytes"
+        )
 
         with open(
             temp_input,
@@ -695,9 +712,15 @@ async def verify_voice(
         # Convert to WAV
         # ----------------------------------------------------
 
+        print("Converting audio...")
+
         convert_to_wav(
             temp_input,
             temp_wav
+        )
+
+        print(
+            "Audio converted successfully."
         )
 
         # ====================================================
@@ -734,6 +757,18 @@ async def verify_voice(
             ]
         )
 
+        # ----------------------------------------------------
+        # FREE ECAPA TEMPORARY MEMORY
+        # ----------------------------------------------------
+
+        del live_embedding
+
+        gc.collect()
+
+        print(
+            "ECAPA temporary memory released."
+        )
+
         # ====================================================
         # AASIST
         # ====================================================
@@ -743,6 +778,8 @@ async def verify_voice(
             "Running AASIST anti-spoofing..."
         )
 
+        # Run AASIST with inference_mode
+        # through the existing AASIST function.
         aasist_result = predict_spoof(
             temp_wav
         )
@@ -782,6 +819,12 @@ async def verify_voice(
             "AASIST Label:",
             spoof_label
         )
+
+        # ----------------------------------------------------
+        # Free temporary tensors
+        # ----------------------------------------------------
+
+        gc.collect()
 
         # ====================================================
         # FINAL RISK
@@ -943,6 +986,7 @@ async def verify_voice(
                 ],
 
             # ECAPA
+
             "similarity":
                 round(
                     similarity,
@@ -955,6 +999,7 @@ async def verify_voice(
                 ],
 
             # AASIST
+
             "spoof_score":
                 round(
                     spoof_score,
@@ -976,6 +1021,7 @@ async def verify_voice(
                 ],
 
             # FINAL RISK
+
             "risk_level":
                 final_risk[
                     "final_risk_level"
@@ -995,14 +1041,22 @@ async def verify_voice(
     except Exception as e:
 
         print()
+        print("==========================================")
+        print("VERIFICATION ERROR")
+        print("==========================================")
         print(
-            "Verification error:",
+            "Error type:",
+            type(e).__name__
+        )
+        print(
+            "Error:",
             str(e)
         )
+        print("==========================================")
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"Verification failed: {type(e).__name__}: {str(e)}"
         )
 
     finally:
@@ -1011,13 +1065,22 @@ async def verify_voice(
             temp_input
         ):
 
-            os.remove(temp_input)
+            try:
+                os.remove(temp_input)
+            except Exception:
+                pass
 
         if temp_wav and os.path.exists(
             temp_wav
         ):
 
-            os.remove(temp_wav)
+            try:
+                os.remove(temp_wav)
+            except Exception:
+                pass
+
+        # Final Python garbage collection
+        gc.collect()
 
 
 # ============================================================
