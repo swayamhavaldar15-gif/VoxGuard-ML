@@ -1,12 +1,20 @@
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+import subprocess
+import tempfile
+import os
+import sys
+import gc
+
+# Keep Render CPU inference lightweight and stable.
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import torch
+
 torch.set_num_threads(1)
+
 try:
     torch.set_num_interop_threads(1)
 except RuntimeError:
@@ -19,11 +27,6 @@ from supabase import create_client, Client
 
 from speechbrain.inference.speaker import EncoderClassifier
 from speechbrain.utils.fetching import LocalStrategy
-
-import subprocess
-import tempfile
-import sys
-import gc
 
 
 # ============================================================
@@ -183,7 +186,7 @@ def get_embedding(audio_path):
     # Add batch dimension
     signal = signal.unsqueeze(0)
 
-    with torch.no_grad():
+    with torch.inference_mode():
 
         embedding = classifier.encode_batch(
             signal
@@ -771,6 +774,7 @@ async def verify_voice(
         # ----------------------------------------------------
 
         del live_embedding
+        del registered_embedding
 
         gc.collect()
 
@@ -813,6 +817,10 @@ async def verify_voice(
             "label",
             "UNKNOWN"
         )
+
+        # Keep only the scalar AASIST results before continuing.
+        del aasist_result
+        gc.collect()
 
         print(
             "AASIST Spoof Score:",
