@@ -43,7 +43,8 @@ AASIST_PATH = os.path.join(
 if AASIST_PATH not in sys.path:
     sys.path.insert(0, AASIST_PATH)
 
-from aasist_inference import predict_spoof
+# AASIST is imported lazily inside /verify-voice
+# to reduce startup memory usage on Render.
 
 
 # ============================================================
@@ -68,43 +69,6 @@ app = FastAPI(
     title="VoxGuard API",
     description="Speaker Verification + Anti-Spoofing + Risk Analysis"
 )
-
-
-# ============================================================
-# REQUEST DIAGNOSTICS
-# ============================================================
-# Logs every incoming request so Render shows whether the
-# request reaches FastAPI before verification inference starts.
-
-@app.middleware("http")
-async def log_requests(request, call_next):
-    print()
-    print(">>> INCOMING REQUEST:", request.method, request.url.path)
-    print(">>> ORIGIN:", request.headers.get("origin"))
-    print(">>> CONTENT-LENGTH:", request.headers.get("content-length"))
-
-    try:
-        response = await call_next(request)
-
-        print(
-            "<<< RESPONSE:",
-            request.method,
-            request.url.path,
-            response.status_code
-        )
-
-        return response
-
-    except Exception as request_error:
-
-        print()
-        print("!!! REQUEST MIDDLEWARE ERROR !!!")
-        print("Path:", request.url.path)
-        print("Error type:", type(request_error).__name__)
-        print("Error:", str(request_error))
-        print("!!! END REQUEST MIDDLEWARE ERROR !!!")
-
-        raise
 
 
 # ============================================================
@@ -152,19 +116,6 @@ classifier = EncoderClassifier.from_hparams(
 )
 
 print("ECAPA model loaded successfully.")
-print()
-
-
-# ============================================================
-# AASIST
-# ============================================================
-
-print()
-print("==========================================")
-print("Loading VoxGuard AASIST Anti-Spoofing Model")
-print("==========================================")
-
-print("AASIST model loaded successfully.")
 print()
 
 
@@ -512,7 +463,9 @@ async def register_voice(
             temp_wav
         )
 
-        print("STEP 3 COMPLETE: Audio converted successfully.")
+        print(
+            "Audio converted successfully."
+        )
 
         # ----------------------------------------------------
         # ECAPA embedding
@@ -650,7 +603,7 @@ async def verify_voice(
         # Find registered speaker
         # ----------------------------------------------------
 
-        print("STEP 1: Loading registered speaker from Supabase...")
+        print("Loading registered speaker...")
 
         if registration_id is not None:
 
@@ -732,7 +685,7 @@ async def verify_voice(
         # Read uploaded audio
         # ----------------------------------------------------
 
-        print("STEP 2: Reading uploaded audio...")
+        print("Reading uploaded audio...")
 
         audio_data = await audio.read()
 
@@ -759,7 +712,7 @@ async def verify_voice(
         # Convert to WAV
         # ----------------------------------------------------
 
-        print("STEP 3: Converting audio with FFmpeg...")
+        print("Converting audio...")
 
         convert_to_wav(
             temp_input,
@@ -775,7 +728,9 @@ async def verify_voice(
         # ====================================================
 
         print()
-        print("STEP 4: Running ECAPA speaker verification...")
+        print(
+            "Running ECAPA speaker verification..."
+        )
 
         live_embedding = get_embedding(
             temp_wav
@@ -811,20 +766,31 @@ async def verify_voice(
 
         gc.collect()
 
-        print("STEP 4 COMPLETE: ECAPA finished and temporary memory released.")
+        print(
+            "ECAPA temporary memory released."
+        )
 
         # ====================================================
         # AASIST
         # ====================================================
 
         print()
-        print("STEP 5: Running AASIST anti-spoofing...")
+        print("==========================================")
+        print("Loading AASIST for verification...")
+        print("==========================================")
 
-        # Run AASIST with inference_mode
-        # through the existing AASIST function.
+        # Import AASIST only when verification actually needs it.
+        # This reduces Render startup memory usage.
+        from aasist_inference import predict_spoof
+
+        print("AASIST module loaded.")
+        print("Running AASIST anti-spoofing...")
+
         aasist_result = predict_spoof(
             temp_wav
         )
+
+        print("AASIST inference completed.")
 
         spoof_score = float(
             aasist_result[
@@ -851,7 +817,10 @@ async def verify_voice(
         del aasist_result
         gc.collect()
 
-        print("STEP 5 COMPLETE: AASIST Spoof Score:", spoof_score)
+        print(
+            "AASIST Spoof Score:",
+            spoof_score
+        )
 
         print(
             "AASIST Bona-fide Score:",
@@ -937,8 +906,6 @@ async def verify_voice(
         # SAVE VERIFICATION LOG
         # ====================================================
 
-        print("STEP 6: Saving verification result to Supabase...")
-
         log_data = {
 
             "registration_id":
@@ -1011,8 +978,6 @@ async def verify_voice(
             ).insert(
                 log_data
             ).execute()
-
-        print("STEP 6 COMPLETE: Verification result saved.")
 
         # ====================================================
         # RETURN RESULT
@@ -1095,8 +1060,10 @@ async def verify_voice(
             "Error type:",
             type(e).__name__
         )
-        print("Error:", str(e))
-        print("Error repr:", repr(e))
+        print(
+            "Error:",
+            str(e)
+        )
         print("==========================================")
 
         raise HTTPException(
