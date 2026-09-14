@@ -71,6 +71,43 @@ app = FastAPI(
 
 
 # ============================================================
+# REQUEST DIAGNOSTICS
+# ============================================================
+# Logs every incoming request so Render shows whether the
+# request reaches FastAPI before verification inference starts.
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    print()
+    print(">>> INCOMING REQUEST:", request.method, request.url.path)
+    print(">>> ORIGIN:", request.headers.get("origin"))
+    print(">>> CONTENT-LENGTH:", request.headers.get("content-length"))
+
+    try:
+        response = await call_next(request)
+
+        print(
+            "<<< RESPONSE:",
+            request.method,
+            request.url.path,
+            response.status_code
+        )
+
+        return response
+
+    except Exception as request_error:
+
+        print()
+        print("!!! REQUEST MIDDLEWARE ERROR !!!")
+        print("Path:", request.url.path)
+        print("Error type:", type(request_error).__name__)
+        print("Error:", str(request_error))
+        print("!!! END REQUEST MIDDLEWARE ERROR !!!")
+
+        raise
+
+
+# ============================================================
 # CORS
 # ============================================================
 
@@ -475,9 +512,7 @@ async def register_voice(
             temp_wav
         )
 
-        print(
-            "Audio converted successfully."
-        )
+        print("STEP 3 COMPLETE: Audio converted successfully.")
 
         # ----------------------------------------------------
         # ECAPA embedding
@@ -615,7 +650,7 @@ async def verify_voice(
         # Find registered speaker
         # ----------------------------------------------------
 
-        print("Loading registered speaker...")
+        print("STEP 1: Loading registered speaker from Supabase...")
 
         if registration_id is not None:
 
@@ -697,7 +732,7 @@ async def verify_voice(
         # Read uploaded audio
         # ----------------------------------------------------
 
-        print("Reading uploaded audio...")
+        print("STEP 2: Reading uploaded audio...")
 
         audio_data = await audio.read()
 
@@ -724,7 +759,7 @@ async def verify_voice(
         # Convert to WAV
         # ----------------------------------------------------
 
-        print("Converting audio...")
+        print("STEP 3: Converting audio with FFmpeg...")
 
         convert_to_wav(
             temp_input,
@@ -740,9 +775,7 @@ async def verify_voice(
         # ====================================================
 
         print()
-        print(
-            "Running ECAPA speaker verification..."
-        )
+        print("STEP 4: Running ECAPA speaker verification...")
 
         live_embedding = get_embedding(
             temp_wav
@@ -778,18 +811,14 @@ async def verify_voice(
 
         gc.collect()
 
-        print(
-            "ECAPA temporary memory released."
-        )
+        print("STEP 4 COMPLETE: ECAPA finished and temporary memory released.")
 
         # ====================================================
         # AASIST
         # ====================================================
 
         print()
-        print(
-            "Running AASIST anti-spoofing..."
-        )
+        print("STEP 5: Running AASIST anti-spoofing...")
 
         # Run AASIST with inference_mode
         # through the existing AASIST function.
@@ -822,10 +851,7 @@ async def verify_voice(
         del aasist_result
         gc.collect()
 
-        print(
-            "AASIST Spoof Score:",
-            spoof_score
-        )
+        print("STEP 5 COMPLETE: AASIST Spoof Score:", spoof_score)
 
         print(
             "AASIST Bona-fide Score:",
@@ -911,6 +937,8 @@ async def verify_voice(
         # SAVE VERIFICATION LOG
         # ====================================================
 
+        print("STEP 6: Saving verification result to Supabase...")
+
         log_data = {
 
             "registration_id":
@@ -983,6 +1011,8 @@ async def verify_voice(
             ).insert(
                 log_data
             ).execute()
+
+        print("STEP 6 COMPLETE: Verification result saved.")
 
         # ====================================================
         # RETURN RESULT
@@ -1065,10 +1095,8 @@ async def verify_voice(
             "Error type:",
             type(e).__name__
         )
-        print(
-            "Error:",
-            str(e)
-        )
+        print("Error:", str(e))
+        print("Error repr:", repr(e))
         print("==========================================")
 
         raise HTTPException(
