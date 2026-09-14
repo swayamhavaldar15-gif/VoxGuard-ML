@@ -1,18 +1,27 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+import torch
+torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
+
+import torch.nn.functional as F
+import soundfile as sf
 
 from supabase import create_client, Client
 
 from speechbrain.inference.speaker import EncoderClassifier
 from speechbrain.utils.fetching import LocalStrategy
 
-import torch
-import torch.nn.functional as F
-import soundfile as sf
-
 import subprocess
 import tempfile
-import os
 import sys
 import gc
 
